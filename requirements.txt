@@ -1,0 +1,14 @@
+sounddevice
+numpy
+webrtcvad-wheels
+assemblyai
+openai
+edge_tts
+setuptools
+rich
+typer
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+google-apps-chat
+python-dotenv
