@@ -28,6 +28,7 @@ from gsuite.slides_cli import create_presentation, get_presentation, add_slide_t
 from gsuite.gmail_cli import send_email, list_gmail_messages, trash_gmail_message
 from gsuite.calendar_cli import list_calendar_events, create_calendar_event, delete_calendar_event
 from gsuite.chat_cli import list_chat_spaces, send_chat_message
+from gsuite.yt_tools import youtube_search, youtube_play
 from interface import AugustInterface
 
 # --- CONFIGURATION ---
@@ -60,6 +61,8 @@ ui = AugustInterface()
 missing_keys = []
 if not AAI_API_KEY: missing_keys.append("AAI_API_KEY (AssemblyAI)")
 if not OPENROUTER_API_KEY: missing_keys.append("OPENROUTER_API_KEY (OpenRouter)")
+# YT_API_KEY is not strictly required for boot, but if it exists we use it.
+YT_API_KEY = os.getenv("YT_API_KEY")
 
 if missing_keys:
     from rich.panel import Panel # Ensure Panel is available here if needed, though ui already has access to console
@@ -104,6 +107,103 @@ client = OpenAI(
 vad = webrtcvad.Vad(3)
 
 # --- GSUITE TOOLS DEFINITION ---
+
+
+
+
+
+# --- AUDIO PLAYBACK CONTROL ---
+
+def stop_current_audio():
+    global current_audio_process
+    with audio_lock:
+        if current_audio_process:
+            try:
+                current_audio_process.terminate()
+                current_audio_process = None
+            except Exception:
+                pass
+
+def play_audio_non_blocking(filename):
+    global current_audio_process
+    stop_current_audio()
+    with audio_lock:
+        try:
+            current_audio_process = subprocess.Popen(["afplay", str(filename)])
+        except FileNotFoundError:
+            try:
+                current_audio_process = subprocess.Popen(["mpg123", str(filename)])
+            except Exception:
+                pass
+
+async def generate_audio_file(text, base_filename):
+    output_path = Path(AUDIO_RESPONSE_DIR) / f"{base_filename}_response.mp3"
+    communicate = edge_tts.Communicate(text, VOICE)
+    await communicate.save(str(output_path))
+    return output_path
+
+def generate_and_play_wrapper(text, base_filename):
+    """Generates audio in a background thread to avoid blocking the main loop."""
+    def run_task():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            output_path = loop.run_until_complete(generate_audio_file(text, base_filename))
+            play_audio_non_blocking(output_path)
+        except Exception as e:
+            ui.log_error(f"Audio generation error: {e}")
+        finally:
+            loop.close()
+    
+    threading.Thread(target=run_task, daemon=True).start()
+
+# --- SESSION MANAGEMENT ---
+
+def perform_logout():
+    """Deletes all token files to force a new login on next run."""
+    tokens = ["token.json"]
+    deleted_any = False
+    for t in tokens:
+        p = Path(t)
+        if p.exists():
+            try:
+                p.unlink()
+                deleted_any = True
+            except Exception as e:
+                ui.log_error(f"Could not delete {t}: {e}")
+    
+    if deleted_any:
+        ui.log_success("SESSION RESET: All tokens deleted.")
+        ui.assistant_response("I've cleared your credentials, Sir. Please restart the application to link a new account.")
+        # We don't exit immediately to allow the user to see the message
+    else:
+        ui.log_system("No active tokens found to clear.")
+
+def clear_responses():
+    """Deletes all files in the recordings and audio_responses directories."""
+    cleared = 0
+    for folder in [OUTPUT_DIR, AUDIO_RESPONSE_DIR]:
+        p = Path(folder)
+        if p.exists():
+            for f in p.iterdir():
+                if f.is_file():
+                    try:
+                        f.unlink()
+                        cleared += 1
+                    except Exception:
+                        pass
+    ui.log_success(f"MAINTENANCE: Cleared {cleared} files from data folders.")
+    ui.assistant_response("Data folders have been purged, Sir. Clean slate.")
+
+# --- SESSION MANAGEMENT ---
+
+def clear_history():
+    """Wipes the current conversation history memory."""
+    global CONVERSATION_HISTORY
+    CONVERSATION_HISTORY = []
+    save_history()
+    ui.log_success("MAINTENANCE: Conversation history has been wiped.")
+    return "Memory cleared, Sir. Clean slate."
 
 TOOLS = [
     # Docs
@@ -389,6 +489,59 @@ TOOLS = [
                 "required": ["presentation_id"]
             }
         }
+    },
+    # Maintenance
+    {
+        "type": "function",
+        "function": {
+            "name": "maintenance_clear_history",
+            "description": "Clear the conversation memory/history",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "maintenance_clear_data_files",
+            "description": "Clear local recordings and audio response files",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "youtube_search",
+            "description": "Search YouTube and return top results (title + videoId).",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Search query"}},
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "youtube_play",
+            "description": "The PREFERRED tool for playing music or videos. Search for a query and immediately play the first result in the browser. Use this whenever the user asks to 'play' a specific song or video.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "video_id": {"type": "string", "description": "The specific videoId to play (optional if query is provided)"},
+                    "query": {"type": "string", "description": "Search query to play the first result automatically (e.g., 'kazkav by starly')"},
+                    "mode": {"type": "string", "description": "Mode to open in: 'music' or 'video'", "enum": ["music", "video"], "default": "music"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "maintenance_reset_session",
+            "description": "Logout and reset credentials for next run",
+            "parameters": {"type": "object", "properties": {}}
+        }
     }
 ]
 
@@ -414,112 +567,14 @@ FUNCTIONS_MAP = {
     "slides_info": get_presentation,
     "slides_add_slide": add_slide_to_presentation,
     "slides_delete": delete_presentation,
+    "maintenance_clear_history": clear_history,
+    "maintenance_clear_data_files": clear_responses,
+    "maintenance_reset_session": perform_logout,
+    "youtube_search": youtube_search,
+    "youtube_play": youtube_play,
 }
 
-# --- AUDIO PLAYBACK CONTROL ---
 
-def stop_current_audio():
-    global current_audio_process
-    with audio_lock:
-        if current_audio_process:
-            try:
-                current_audio_process.terminate()
-                current_audio_process = None
-            except Exception:
-                pass
-
-def play_audio_non_blocking(filename):
-    global current_audio_process
-    stop_current_audio()
-    with audio_lock:
-        try:
-            current_audio_process = subprocess.Popen(["afplay", str(filename)])
-        except FileNotFoundError:
-            try:
-                current_audio_process = subprocess.Popen(["mpg123", str(filename)])
-            except Exception:
-                pass
-
-async def generate_audio_file(text, base_filename):
-    output_path = Path(AUDIO_RESPONSE_DIR) / f"{base_filename}_response.mp3"
-    communicate = edge_tts.Communicate(text, VOICE)
-    await communicate.save(str(output_path))
-    return output_path
-
-def generate_and_play_wrapper(text, base_filename):
-    """Generates audio in a background thread to avoid blocking the main loop."""
-    def run_task():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            output_path = loop.run_until_complete(generate_audio_file(text, base_filename))
-            play_audio_non_blocking(output_path)
-        except Exception as e:
-            ui.log_error(f"Audio generation error: {e}")
-        finally:
-            loop.close()
-    
-    threading.Thread(target=run_task, daemon=True).start()
-
-# --- SESSION MANAGEMENT ---
-
-def perform_logout():
-    """Deletes all token files to force a new login on next run."""
-    tokens = ["token.json"]
-    deleted_any = False
-    for t in tokens:
-        p = Path(t)
-        if p.exists():
-            try:
-                p.unlink()
-                deleted_any = True
-            except Exception as e:
-                ui.log_error(f"Could not delete {t}: {e}")
-    
-    if deleted_any:
-        ui.log_success("SESSION RESET: All tokens deleted.")
-        ui.assistant_response("I've cleared your credentials, Sir. Please restart the application to link a new account.")
-        # We don't exit immediately to allow the user to see the message
-    else:
-        ui.log_system("No active tokens found to clear.")
-
-def clear_responses():
-    """Deletes all files in the recordings and audio_responses directories."""
-    cleared = 0
-    for folder in [OUTPUT_DIR, AUDIO_RESPONSE_DIR]:
-        p = Path(folder)
-        if p.exists():
-            for f in p.iterdir():
-                if f.is_file():
-                    try:
-                        f.unlink()
-                        cleared += 1
-                    except Exception:
-                        pass
-    ui.log_success(f"MAINTENANCE: Cleared {cleared} files from data folders.")
-    ui.assistant_response("Data folders have been purged, Sir. Clean slate.")
-
-# Start keyboard listener in background
-def keyboard_listener():
-    """Listens for shortcuts without requiring global macOS accessibility permissions."""
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(sys.stdin.fileno())
-        while True:
-            char = sys.stdin.read(1)
-            if char.lower() == 'l':
-                perform_logout()
-            elif char.lower() == 'h':
-                clear_responses()
-            elif char == '\x03':  # Ctrl+C
-                break
-    except Exception:
-        pass
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-threading.Thread(target=keyboard_listener, daemon=True).start()
 
 # --- AI BRAIN ---
 
@@ -540,7 +595,14 @@ def save_history():
     except Exception as e:
         ui.log_error(f"Error saving history: {e}")
 
-def process_transcription(transcription_text, base_filename):
+
+
+
+
+def process_transcription(transcription_text, base_filename=None):
+    if not base_filename:
+        base_filename = f"text_input_{int(time.time())}"
+
     global CONVERSATION_HISTORY
     if not transcription_text:
         return
@@ -568,23 +630,46 @@ def process_transcription(transcription_text, base_filename):
                 "DO NOT call the tool yet. Instead, ask for the missing details politely.\n"
                 "- If multiple actions are needed, execute them in order.\n"
                 "- Keep spoken responses concise (under 50 words).\n"
-                "- Use the conversation history to remember context (e.g. if the user previously mentioned a title, use it)."
+                "- Use the conversation history to remember context (e.g. if the user previously mentioned a title, use it).\n"
+                "- If the user asks to 'play' a song, ALWAYS use youtube_play with the query to immediately open it for them. Do not list options unless specifically asked to 'search'."
             )
         }
 
-        # Add user message to history
+        # Add User Message to history
         current_user_msg = {"role": "user", "content": transcription_text}
         CONVERSATION_HISTORY.append(current_user_msg)
         
         # Prepare messages for API (System prompt + History)
-        api_messages = [system_prompt] + CONVERSATION_HISTORY[-15:]
+        # Injection of current real-time date and time
+        current_time_context = f"Current date and time: {datetime.now().strftime('%A, %B %d, %Y or %H:%M:%S')}"
+        system_prompt = {
+            "role": "system", 
+            "content": (
+                "You are August, a professional AI assistant. You follow a curated, refined, and helpful persona. "
+                "You have access to Google Workspace via tools. "
+                "Always be concise yet polite. Address the user as Sir. "
+                f"{current_time_context}"
+            )
+        }
+
+        # Safe truncation: ensure we don't start with a 'tool' message which requires a preceding assistant message
+        history_slice = CONVERSATION_HISTORY[-15:]
+        while history_slice and (isinstance(history_slice[0], dict) and history_slice[0].get("role") == "tool"):
+            history_slice = history_slice[1:]
+        
+        # If it was a model object from OpenAI, we need to be extra careful
+        while history_slice and (not isinstance(history_slice[0], dict) and getattr(history_slice[0], "role", None) == "tool"):
+            history_slice = history_slice[1:]
+
+        api_messages = [system_prompt] + history_slice
 
         response = client.chat.completions.create(
             model=AI_MODEL,
             messages=api_messages,
             tools=TOOLS,
-            tool_choice="auto",
+            tool_choice="auto"
         )
+
 
         response_message = response.choices[0].message
         tool_calls = response_message.tool_calls
@@ -636,10 +721,17 @@ def process_transcription(transcription_text, base_filename):
             ui.assistant_response(response_content)
             generate_and_play_wrapper(response_content, base_filename)
         
-        # Save and prune history to keep it fast
+        # Save and prune history safely
         if len(CONVERSATION_HISTORY) > 40:
+            # Prune while ensuring we don't start with a tool message
             CONVERSATION_HISTORY = CONVERSATION_HISTORY[-30:]
+            while CONVERSATION_HISTORY and (
+                (isinstance(CONVERSATION_HISTORY[0], dict) and CONVERSATION_HISTORY[0].get("role") == "tool") or
+                (not isinstance(CONVERSATION_HISTORY[0], dict) and getattr(CONVERSATION_HISTORY[0], "role", None) == "tool")
+            ):
+                CONVERSATION_HISTORY = CONVERSATION_HISTORY[1:]
         save_history()
+
 
     except Exception as e:
         ui.log_error(f"AUGUST Error: {e}")
@@ -715,21 +807,108 @@ def continuous_listening():
                     recording_frames = []
                     silence_start = None
 
-    with sd.InputStream(channels=CHANNELS, samplerate=RATE, blocksize=FRAME_SIZE, dtype="float32", callback=callback):
-        ui.waiting()
-        while True:
-            try:
-                segment_frames = audio_queue.get(timeout=0.1)
-                filename, base_name = save_wav(segment_frames)
-                if filename:
-                    transcribe_and_process(filename, base_name)
-            except queue.Empty:
+def handle_input(text, source="text"):
+    """Unified handler for both voice and text input."""
+    # Process text input
+    if text.startswith("/logout"):
+        ui.log_system("Logging out...")
+        # (add logout logic if needed)
+        return
+    if text.startswith("/clear"):
+        ui.clear()
+        return
+    
+    # Send to AI
+    process_transcription(text)
+
+def voice_listener_loop(audio_queue):
+    """Background thread to process segments as they arrive."""
+    while True:
+        try:
+            # Get audio segment from queue (blocking)
+            segment_frames = audio_queue.get(timeout=1.0)
+            if not segment_frames:
                 continue
-            except KeyboardInterrupt:
-                break
+            
+            # Save to temporary file
+            filename, base_name = save_wav(segment_frames)
+            if filename:
+                # Transcribe and follow logic
+                transcribe_and_process(filename, base_name)
+        except queue.Empty:
+            continue
+        except Exception as e:
+            ui.log_error(f"Voice Processor Error: {e}")
+            time.sleep(1)
+
+def main_hybrid_loop():
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.patch_stdout import patch_stdout
+    from prompt_toolkit.styles import Style
+
+    ui.startup_banner()
+    ui.hybrid_mode = True
+
+    
+    audio_queue = queue.Queue()
+    recording_frames = []
+    recording = False
+    silence_start = None
+
+    def audio_callback(indata, frames, time_info, status):
+        nonlocal recording_frames, recording, silence_start
+        mono = indata[:, 0]
+        pcm16 = (mono * 32767).astype(np.int16)
+        
+        # Audio processing logic
+        try:
+            is_speech = vad.is_speech(pcm16.tobytes(), RATE)
+        except Exception:
+            return
+
+        if is_speech:
+            if not recording:
+                recording = True
+                recording_frames = []
+            recording_frames.append(pcm16)
+            silence_start = None
+        else:
+            if recording:
+                if silence_start is None:
+                    silence_start = time.time()
+                elif time.time() - silence_start > SILENCE_TIMEOUT:
+                    audio_queue.put(list(recording_frames))
+                    recording = False
+                    recording_frames = []
+                    silence_start = None
+
+    # Start voice processing thread
+    voice_thread = threading.Thread(target=voice_listener_loop, args=(audio_queue,), daemon=True)
+    voice_thread.start()
+
+    # Create prompt-toolkit session
+    session = PromptSession(style=Style.from_dict({
+        'prompt': 'bold cyan',
+    }))
+
+    ui.waiting()
+    
+    with patch_stdout():
+        # Start the audio stream
+        with sd.InputStream(callback=audio_callback, samplerate=RATE, channels=1, blocksize=FRAME_SIZE, dtype="float32"):
+            while True:
+                try:
+                    text = session.prompt("August > ")
+                    if text.strip():
+                        # Run the command processing in a background thread
+                        # so the text prompt remains responsive immediately
+                        threading.Thread(target=handle_input, args=(text, "text"), daemon=True).start()
+                except KeyboardInterrupt:
+
+                    break
+                except EOFError:
+                    break
 
 if __name__ == "__main__":
-    try:
-        continuous_listening()
-    except KeyboardInterrupt:
-        stop_current_audio()
+    main_hybrid_loop()
+

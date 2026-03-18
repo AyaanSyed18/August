@@ -23,12 +23,31 @@ custom_theme = Theme({
     "data": "italic grey70",
 })
 
-console = Console(theme=custom_theme)
+from prompt_toolkit import print_formatted_text
+from prompt_toolkit.formatted_text import ANSI
+from io import StringIO
+
+console = Console(theme=custom_theme, force_terminal=True, color_system="standard", soft_wrap=True)
 
 class AugustInterface:
     def __init__(self):
         self.console = console
         self._status = None
+        self.hybrid_mode = False
+
+    def _safe_print(self, content):
+        """Prints content safely, handling prompt-toolkit redirection if active."""
+        if self.hybrid_mode:
+            # Capture Rich output to a string with ANSI codes
+            with StringIO() as buf:
+                temp_console = Console(file=buf, theme=custom_theme, force_terminal=True, color_system="standard", width=80)
+                temp_console.print(content)
+                text = buf.getvalue().strip()
+                # Use prompt-toolkit's ANSI printer to ensure codes are interpreted correctly
+                print_formatted_text(ANSI(text))
+        else:
+            self.console.print(content)
+
 
     def startup_banner(self):
         banner_art = r"""
@@ -40,7 +59,7 @@ class AugustInterface:
 ╚═╝  ╚═╝ ╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝   ╚═╝   
         """
         self.console.print("\n")
-        self.console.print(Panel(
+        self._safe_print(Panel(
             Text(banner_art, style="august"),
             title="[system]v2.0.0[/system]",
             subtitle="[action]SYSTEM ONLINE[/action]",
@@ -48,22 +67,26 @@ class AugustInterface:
             expand=False,
             padding=(0, 2)
         ))
+
         
-        self.console.print("[system]Initializing secure connection...[/system]")
-        time.sleep(0.3)
-        self.console.print("[system]Loading G-Suite modules: Google Applications[/system]")
-        time.sleep(0.3)
-        self.console.print("[success]Core directives active. Voice sensors calibrated.[/success]")
-        self.console.print("[dim white]Shortcuts: [bold cyan]'L'[/bold cyan] Logout | [bold cyan]'H'[/bold cyan] Clear Cache/Responses[/dim white]\n")
+        self._safe_print("[system]Initializing secure connection...[/system]")
+        # time.sleep(0.3)
+        self._safe_print("[system]Loading G-Suite modules: Google Applications[/system]")
+        # time.sleep(0.3)
+        self._safe_print("[success]Core directives active. Hybrid input sensors calibrated.[/success]")
+        self._safe_print("[dim white]Type commands or speak freely. Use [bold cyan]'/logout'[/bold cyan] or [bold cyan]'/clear'[/bold cyan] for maintenance.[/dim white]\n")
+
 
     def log_system(self, message):
-        self.console.print(f"[system][{time.strftime('%H:%M:%S')}] {message}[/system]")
+        self._safe_print(f"[system][{time.strftime('%H:%M:%S')}] {message}[/system]")
+
 
     def log_success(self, message):
-        self.console.print(f"[success]✔ {message}[/success]")
+        self._safe_print(f"[success]✔ {message}[/success]")
 
     def log_error(self, message):
-        self.console.print(f"[error]✘ {message}[/error]")
+        self._safe_print(f"[error]✘ {message}[/error]")
+
 
     def log_action(self, func_name, args):
         self.stop_thinking()
@@ -74,12 +97,13 @@ class AugustInterface:
         for k, v in args.items():
             table.add_row(Text(f"  {k}:", style="dim"), Text(str(v), style="white"))
         
-        self.console.print(Panel(
+        self._safe_print(Panel(
             table,
             title=f"[action]EXECUTING: {func_name}[/action]",
             border_style="yellow",
             expand=False
         ))
+
 
     def show_thinking(self, text=None):
         self.stop_thinking()
@@ -87,12 +111,12 @@ class AugustInterface:
         status_text = "August is processing..."
         if text:
             # truncate long text
-            if len(text) > 50:
-                text = text[:47] + "..."
-            status_text = f"Analyzing: [italic]\"{text}\"[/italic]"
+            truncated_text = text[:47] + "..." if len(text) > 50 else text
+            status_text = f"Analyzing: [italic]\"{truncated_text}\"[/italic]"
             
-        self._status = self.console.status(status_text, spinner="aesthetic")
-        self._status.start()
+        # Simplified static status to avoid ANSI junk with prompt_toolkit session
+        self._safe_print(f"[success]▰▰▰▰▰▰▰[/success] {status_text}")
+
 
     def stop_thinking(self):
         if hasattr(self, '_status') and self._status:
@@ -106,7 +130,7 @@ class AugustInterface:
         self.stop_thinking()
         # Only show if not empty
         if text.strip():
-            self.console.print(Padding(
+            self._safe_print(Padding(
                 Panel(
                     Text(text, style="white"),
                     title="[user]USER[/user]",
@@ -118,16 +142,19 @@ class AugustInterface:
 
     def assistant_response(self, text):
         self.stop_thinking()
-        self.console.print(Panel(
+        self._safe_print(Panel(
             Text(text, style="bright_white"),
             title="[august]AUGUST[/august]",
             border_style="bright_blue",
-            padding=(1, 2)
+            padding=(1, 2),
+            expand=False
         ))
 
     def waiting(self):
         self.stop_thinking()
-        self.console.print("[system]Listening... (Ambient Mode)[/system]")
+        self._safe_print("\n[success]⦿ MICROPHONE ACTIVE[/success] [system]| Dual Input Mode Online[/system]")
+
+
 
     def clear(self):
         self.console.clear()

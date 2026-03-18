@@ -9,6 +9,7 @@ Inspired by Stark's Jarvis, **AUGUST** is a premium, voice-controlled AI assista
 - **🔒 Secure Authentication**: Robust OAuth 2.0 flow with a unified "one-time" login for all services.
 - **🚀 High Performance**: Non-blocking audio architecture and batch-processed Gmail requests for zero lag.
 - **🧠 Multi-Turn Memory**: Robust conversation history management that understands context.
+- **🎥 Multimedia Control**: Integrated YouTube and YouTube Music support for hands-free entertainment.
 
 ## 🛠️ Tech Stack
 - **Languages**: Python 3.10+
@@ -44,9 +45,11 @@ Create a `.env` file in the root directory and add your keys:
 ```env
 AAI_API_KEY=your_assemblyai_key
 OPENROUTER_API_KEY=your_openrouter_key
+YT_API_KEY=your_youtube_api_key
 ```
 - **AssemblyAI**: Get your key at [assemblyai.com](https://www.assemblyai.com/).
 - **OpenRouter**: Get your key at [openrouter.ai](https://openrouter.ai/).
+- **YouTube**: Create a project in [Google Cloud Console](https://console.cloud.google.com/) and generate an API Key for the YouTube Data API v3.
 
 ### 2. Google Credentials
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
@@ -66,6 +69,8 @@ Start your sentence with the wake word **"August"**:
 - *"August, create a new document called 'Project Plan' and add a list of goals."*
 - *"August, list my last 5 emails and trash the most recent one."*
 - *"August, schedule a meeting tomorrow at 10 AM regarding the website launch."*
+- *"August, play some smooth jazz on YouTube."*
+- *"August, search for 'Python tutorials' on YouTube."*
 
 ### Keyboard Shortcuts
 - **`L`** : **Logout** / Reset Session (Deletes tokens to switch Google accounts).
